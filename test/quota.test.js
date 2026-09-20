@@ -17,6 +17,7 @@ import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import { pathToFileURL } from 'node:url';
 import { discoverQuotaProducts, fetchQuotaProducts } from '../src/quotas/registry.js';
+import { quotaResult } from '../src/quotas/schema.js';
 import {
   fetchKimiCodeQuota,
   kimiCredentialPath,
@@ -253,15 +254,49 @@ test('Kimi parser supports summary, detail.remaining, duration, and reset spelli
   const meters = parseKimiUsage(kimiPayload, new Date('2026-09-07T00:00:00Z'));
   assert.equal(meters.length, 2);
   assert.deepEqual(meters[0], {
+    id: '1-5h',
+    label: '5h',
+    utilization: 20,
+    resetsAt: '2026-09-07T05:00:00.000Z',
+    windowSeconds: 18_000,
+  });
+  assert.deepEqual(meters[1], {
     id: '0-weekly',
-    label: 'Weekly',
+    label: '7d',
     utilization: 25,
     resetsAt: '2026-09-14T00:00:00.000Z',
+    windowSeconds: 604_800,
   });
-  assert.equal(meters[1].label, '5h');
-  assert.equal(meters[1].utilization, 20);
-  assert.equal(meters[1].windowSeconds, 18_000);
-  assert.equal(meters[1].resetsAt, '2026-09-07T05:00:00.000Z');
+});
+
+test('quota layout keeps generic periods first and preserves extra-meter order', () => {
+  const result = quotaResult({
+    id: 'kimi-code',
+    status: 'ok',
+    meters: [
+      { id: 'mcp', label: 'MCP', utilization: 4, windowSeconds: 2_592_000 },
+      { id: 'weekly', label: 'Weekly', utilization: 30 },
+      { id: 'sonnet', label: 'Sonnet', utilization: 40, windowSeconds: 604_800 },
+      { id: 'five-hour', label: '5h', utilization: 10, windowSeconds: 18_000 },
+      { id: 'extra', label: 'Extra', utilization: 50 },
+    ],
+  });
+
+  assert.deepEqual(result.meters.map(meter => meter.label), [
+    '5h', '7d', 'MCP', 'Sonnet', 'Extra',
+  ]);
+});
+
+test('Kimi deduplicates weekly aliases after canonicalizing their labels', () => {
+  const meters = parseKimiUsage({
+    usage: { name: 'Weekly', used: 25, limit: 100 },
+    limits: [{
+      window: { duration: 7, timeUnit: 'DAY' },
+      detail: { name: '7d', used: 25, limit: 100 },
+    }],
+  });
+
+  assert.deepEqual(meters.map(meter => meter.label), ['7d']);
 });
 
 test('Kimi fetch keeps a fresh official login unchanged and sends bearer auth', async () => {

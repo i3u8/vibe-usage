@@ -15,7 +15,7 @@ import {
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { attachCacheScope } from '../cache.js';
-import { quotaResult } from '../schema.js';
+import { canonicalizeMeters, quotaResult } from '../schema.js';
 
 const PRODUCT_ID = 'kimi-code';
 const DEFAULT_USAGE_URL = 'https://api.kimi.com/coding/v1/usages';
@@ -126,7 +126,7 @@ export function parseKimiUsage(payload, now = new Date()) {
     }
   }
   const seen = new Set();
-  return meters.filter(meter => {
+  return canonicalizeMeters(meters).filter(meter => {
     const key = `${meter.label}\0${meter.windowSeconds || ''}`;
     if (seen.has(key)) return false;
     seen.add(key);
