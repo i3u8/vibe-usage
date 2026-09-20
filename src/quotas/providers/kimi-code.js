@@ -110,6 +110,29 @@ export function parseKimiUsage(payload, now = new Date()) {
     throw new Error('Kimi usage response is not an object');
   }
   const meters = [];
+  if (payload.usages && typeof payload.usages === 'object' && !Array.isArray(payload.usages)) {
+    const currentMeters = [
+      ['limit_5h', '5h', 5 * 3600],
+      ['limit_7d', '7d', 7 * 86400],
+      ['limit_month_total', 'Monthly', null],
+      ['limit_month_code', 'Monthly Code', null],
+    ];
+    for (const [key, label, windowSeconds] of currentMeters) {
+      const entry = payload.usages[key];
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue;
+      const ratio = number(entry.used_ratio ?? entry.usedRatio);
+      if (ratio === null) continue;
+      const meter = {
+        id: key.replaceAll('_', '-'),
+        label,
+        utilization: Math.max(0, Math.min(100, ratio * 100)),
+      };
+      const resetsAt = resetDate(entry, now);
+      if (resetsAt) meter.resetsAt = resetsAt.toISOString();
+      if (windowSeconds) meter.windowSeconds = windowSeconds;
+      meters.push(meter);
+    }
+  }
   if (payload.usage && typeof payload.usage === 'object' && !Array.isArray(payload.usage)) {
     const summary = meterFrom(payload.usage, payload.usage, 0, 'Weekly', now);
     if (summary) meters.push(summary);
@@ -134,9 +157,21 @@ export function parseKimiUsage(payload, now = new Date()) {
   });
 }
 
+export function kimiCredentialPaths(environment = process.env, home = homedir()) {
+  const codeHome = environment.KIMI_CODE_HOME?.trim() || join(home, '.kimi-code');
+  const legacyHome = environment.KIMI_SHARE_DIR?.trim() || join(home, '.kimi');
+  return [...new Set([codeHome, legacyHome]
+    .map(directory => join(directory, 'credentials', 'kimi-code.json')))];
+}
+
 export function kimiCredentialPath(environment = process.env, home = homedir()) {
-  const shareDirectory = environment.KIMI_SHARE_DIR?.trim() || join(home, '.kimi');
-  return join(shareDirectory, 'credentials', 'kimi-code.json');
+  const paths = kimiCredentialPaths(environment, home);
+  for (const path of paths) {
+    try {
+      if (statSync(path).isFile()) return path;
+    } catch {}
+  }
+  return paths[0];
 }
 
 function readCredentials(path) {
