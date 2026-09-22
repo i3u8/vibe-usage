@@ -84,6 +84,7 @@ test('quota discovery detects Grok and Cursor independently', () => {
   const bin = join(root, 'bin');
   mkdirSync(join(root, '.kimi-code'), { recursive: true });
   mkdirSync(join(root, '.grok', 'logs'), { recursive: true });
+  mkdirSync(join(root, '.local', 'share', 'opencode'), { recursive: true });
   mkdirSync(join(root, '.cursor'), { recursive: true });
   mkdirSync(bin);
   writeFileSync(join(bin, 'zcode'), '#!/bin/sh\n');
@@ -99,6 +100,7 @@ test('quota discovery detects Grok and Cursor independently', () => {
       { id: 'kimi-code', detected: true, fetchable: true },
       { id: 'zcode', detected: true, fetchable: true },
       { id: 'grok', detected: true, fetchable: true },
+      { id: 'opencode-go', detected: true, fetchable: true },
       { id: 'cursor', detected: true, fetchable: false },
     ]);
   } finally {
@@ -130,6 +132,7 @@ test('quota discovery follows Windows PATH and PATHEXT command rules', () => {
       { id: 'kimi-code', detected: true, fetchable: true },
       { id: 'zcode', detected: true, fetchable: true },
       { id: 'grok', detected: true, fetchable: true },
+      { id: 'opencode-go', detected: false, fetchable: true },
       { id: 'cursor', detected: true, fetchable: false },
     ]);
   } finally {

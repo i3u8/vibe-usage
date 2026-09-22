@@ -52,7 +52,7 @@ test('quota discover prints a versioned JSON-only contract', () => {
   const payload = JSON.parse(result.stdout);
   assert.equal(payload.schemaVersion, 1);
   assert.deepEqual(payload.products.map(product => product.id), [
-    'kimi-code', 'zcode', 'grok', 'cursor',
+    'kimi-code', 'zcode', 'grok', 'opencode-go', 'cursor',
   ]);
 });
 

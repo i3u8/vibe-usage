@@ -4,6 +4,7 @@ import { delimiter, join } from 'node:path';
 import { loadCachedQuota, saveCachedQuota } from './cache.js';
 import { fetchGrokQuota } from './providers/grok.js';
 import { fetchKimiCodeQuota } from './providers/kimi-code.js';
+import { fetchOpenCodeGoQuota } from './providers/opencode-go.js';
 import { fetchZaiQuota } from './providers/zai.js';
 import { FETCHABLE_QUOTA_PRODUCT_IDS, quotaEnvelope, quotaResult } from './schema.js';
 
@@ -11,6 +12,7 @@ const providers = new Map([
   ['kimi-code', fetchKimiCodeQuota],
   ['zcode', fetchZaiQuota],
   ['grok', fetchGrokQuota],
+  ['opencode-go', fetchOpenCodeGoQuota],
 ]);
 
 function executableExists(name, environment, platform) {
@@ -71,6 +73,12 @@ export function discoverQuotaProducts({
     {
       id: 'grok',
       detected: existsAny([grokHome]) || executableExists('grok', environment, platform),
+      fetchable: true,
+    },
+    {
+      id: 'opencode-go',
+      detected: existsAny([join(home, '.local', 'share', 'opencode')])
+        || executableExists('opencode', environment, platform),
       fetchable: true,
     },
     {

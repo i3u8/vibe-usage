@@ -4,6 +4,7 @@ export const QUOTA_PRODUCT_IDS = Object.freeze([
   'kimi-code',
   'zcode',
   'grok',
+  'opencode-go',
   'cursor',
 ]);
 
@@ -11,6 +12,7 @@ export const FETCHABLE_QUOTA_PRODUCT_IDS = Object.freeze([
   'kimi-code',
   'zcode',
   'grok',
+  'opencode-go',
 ]);
 
 const FETCH_STATUSES = new Set([
