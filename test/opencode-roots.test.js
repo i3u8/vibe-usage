@@ -16,17 +16,30 @@ function rows(session = 'ses_one', model = 'test-model') {
     { id: 'reply', sessionID: session, role: 'assistant', time: { created: start + 1000 },
       modelID: model, tokens: { input: 10, output: 3, reasoning: 1, cache: { read: 2 } }, path: { root: '/work/project' } }];
 }
-function sqlite(root, messages) {
-  mkdirSync(root, { recursive: true });
-  const quote = v => "'" + String(v).replaceAll("'", "''") + "'";
-  const sql = 'CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, data TEXT);'
-    + messages.map(m => `INSERT INTO message VALUES (${quote(m.id)},${quote(m.sessionID)},${quote(JSON.stringify(m))});`).join('');
+function execSql(path, sql) {
   let DatabaseSync;
   try { ({ DatabaseSync } = require('node:sqlite')); } catch { /* Node 20 uses the CLI. */ }
-  const path = join(root, 'opencode.db');
   if (DatabaseSync) { const db = new DatabaseSync(path); try { db.exec(sql); } finally { db.close(); } }
   else execFileSync('sqlite3', [path], { input: sql });
 }
+function quoteSql(value) { return "'" + String(value).replaceAll("'", "''") + "'"; }
+function sqlite(root, messages) {
+  mkdirSync(root, { recursive: true });
+  const sql = 'CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, data TEXT);'
+    + messages.map(m => `INSERT INTO message VALUES (${quoteSql(m.id)},${quoteSql(m.sessionID)},${quoteSql(JSON.stringify(m))});`).join('');
+  execSql(join(root, 'opencode.db'), sql);
+}
+// OpenCode 2.x layout: usage lives in the session_message projection, the
+// project directory in the session row, and there is no legacy message table.
+function sqliteV2(root, { sessions = [], messages = [], sessionTable = 'session_v2' }) {
+  mkdirSync(root, { recursive: true });
+  const sql = `CREATE TABLE ${sessionTable} (id TEXT PRIMARY KEY, directory TEXT);`
+    + 'CREATE TABLE session_message (id TEXT PRIMARY KEY, session_id TEXT, type TEXT, time_created INTEGER, data TEXT);'
+    + sessions.map(s => `INSERT INTO ${sessionTable} VALUES (${quoteSql(s.id)},${quoteSql(s.directory)});`).join('')
+    + messages.map(m => `INSERT INTO session_message VALUES (${quoteSql(m.id)},${quoteSql(m.sessionID)},${quoteSql(m.type)},${Number(m.time)},${quoteSql(JSON.stringify(m.data))});`).join('');
+  execSql(join(root, 'opencode.db'), sql);
+}
+function v2Message(id, sessionID, type, time, data = {}) { return { id, sessionID, type, time, data }; }
 function json(root, messages) {
   mkdirSync(join(root, 'storage', 'message'), { recursive: true });
   for (const m of messages) {
@@ -137,4 +150,76 @@ test('unreadable OpenCode database protects the source state', {
     assert.ok(result.warnings.length);
     assert.deepEqual(result.buckets, []);
   });
+}));
+
+test('OpenCode reads the 2.x session_message projection without a legacy message table', async () => fixture(async (root, primary) => {
+  sqliteV2(primary, {
+    sessions: [{ id: 'ses_v2', directory: '/work/v2-project' }],
+    messages: [
+      v2Message('msg_u1', 'ses_v2', 'user', start, { type: 'user', text: 'private prompt text' }),
+      v2Message('msg_a1', 'ses_v2', 'assistant', start + 1000, {
+        type: 'assistant',
+        model: { id: 'claude-opus-4-6', providerID: 'opencode' },
+        tokens: { input: 10, output: 3, reasoning: 1, cache: { read: 2, write: 4 } },
+      }),
+      v2Message('msg_idle', 'ses_v2', 'idle', start + 2000, { type: 'idle' }),
+    ],
+  });
+  const result = await parse();
+  assert.equal(result.skipped, undefined);
+  assert.equal(result.buckets.length, 1);
+  assert.deepEqual(result.buckets[0], {
+    source: 'opencode',
+    model: 'claude-opus-4-6',
+    project: 'v2-project',
+    bucketStart: '2026-09-12T00:00:00.000Z',
+    inputTokens: 10,
+    outputTokens: 3,
+    cachedInputTokens: 2,
+    reasoningOutputTokens: 1,
+    cacheCreation5mTokens: 4,
+    cacheCreation1hTokens: 0,
+    totalTokens: 18,
+  });
+  assert.equal(result.sessions.length, 1);
+  assert.equal(result.sessions[0].userMessageCount, 1);
+  assert.equal(result.sessions[0].messageCount, 2);
+}));
+
+test('OpenCode reads a store whose session row uses the pre-split session table name', async () => fixture(async (root, primary) => {
+  sqliteV2(primary, {
+    sessionTable: 'session',
+    sessions: [{ id: 'ses_plain', directory: '/work/plain-session' }],
+    messages: [v2Message('msg_a1', 'ses_plain', 'assistant', start, {
+      model: { id: 'kimi-k2.5', providerID: 'opencode' },
+      tokens: { input: 5, output: 2, reasoning: 0, cache: { read: 0, write: 0 } },
+    })],
+  });
+  const result = await parse();
+  assert.equal(result.buckets[0].project, 'plain-session');
+  assert.equal(result.buckets[0].model, 'kimi-k2.5');
+  assert.equal(result.buckets[0].inputTokens, 5);
+}));
+
+test('OpenCode counts a message present in both stores once and keeps its legacy project', async () => fixture(async (root, primary) => {
+  sqlite(primary, rows());
+  const shared = JSON.parse(JSON.stringify(rows()));
+  const sql = 'CREATE TABLE session_v2 (id TEXT PRIMARY KEY, directory TEXT);'
+    + 'CREATE TABLE session_message (id TEXT PRIMARY KEY, session_id TEXT, type TEXT, time_created INTEGER, data TEXT);'
+    + `INSERT INTO session_v2 VALUES (${quoteSql('ses_one')},${quoteSql('/work/migrated-project')});`
+    + shared.filter(m => m.role === 'assistant').map(m => `INSERT INTO session_message VALUES (${quoteSql(m.id)},${quoteSql(m.sessionID)},${quoteSql('assistant')},${m.time.created},${quoteSql(JSON.stringify(m))});`).join('');
+  execSql(join(primary, 'opencode.db'), sql);
+  const result = await parse();
+  assert.equal(result.buckets.length, 1);
+  assert.equal(result.buckets[0].inputTokens, 10);
+  assert.equal(result.buckets[0].project, 'project');
+}));
+
+test('OpenCode names an unreadable store shape instead of reporting a missing table', async () => fixture(async (root, primary) => {
+  mkdirSync(primary, { recursive: true });
+  execSql(join(primary, 'opencode.db'), 'CREATE TABLE unrelated (id TEXT);');
+  const result = await parse();
+  assert.equal(result.skipped, true);
+  assert.deepEqual(result.buckets, []);
+  assert.match(result.warnings[0], /不认识的表结构/);
 }));

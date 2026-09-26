@@ -2,6 +2,7 @@ import {
   accessSync,
   closeSync,
   constants as fsConstants,
+  existsSync,
   fsyncSync,
   mkdirSync,
   openSync,
@@ -134,9 +135,35 @@ export function parseKimiUsage(payload, now = new Date()) {
   });
 }
 
+// Kimi Code has two credential locations in the wild. kimi-cli (1.x) keeps
+// `$KIMI_SHARE_DIR/credentials/kimi-code.json`, defaulting to `~/.kimi`, while
+// the current CLI (2.x) writes `$KIMI_CODE_HOME/credentials/kimi-code.json`,
+// defaulting to `~/.kimi-code` -- the same home the session parser already
+// resolves. Reading only the legacy path reported `missing_credentials` for
+// every 2.x user whose login sits in the new home (issue #112), while their
+// usage parsed fine, so the quota card contradicted the token tables.
+export function kimiCredentialPaths(environment = process.env, home = homedir()) {
+  const directories = [
+    environment.KIMI_SHARE_DIR?.trim(),
+    environment.KIMI_CODE_HOME?.trim(),
+    join(home, '.kimi-code'),
+    join(home, '.kimi'),
+  ];
+  return directories.filter(Boolean).map(directory => join(directory, 'credentials', 'kimi-code.json'));
+}
+
+/**
+ * The credential file to read and, on refresh, to rotate atomically.
+ *
+ * A login that exists wins over one that does not, in the order above: an
+ * explicitly configured home outranks the CLI default, and the current CLI
+ * home outranks the legacy one. With no login anywhere the current CLI's path
+ * is returned so `missing_credentials` (and any rotation that follows a later
+ * login) names the file the installed CLI actually writes.
+ */
 export function kimiCredentialPath(environment = process.env, home = homedir()) {
-  const shareDirectory = environment.KIMI_SHARE_DIR?.trim() || join(home, '.kimi');
-  return join(shareDirectory, 'credentials', 'kimi-code.json');
+  const paths = kimiCredentialPaths(environment, home);
+  return paths.find(path => existsSync(path)) || paths[0];
 }
 
 function readCredentials(path) {

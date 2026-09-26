@@ -114,19 +114,40 @@ function escapeXml(value) {
 
 // Variables that relocate a tool's on-disk store. The service runs from a
 // launchd/systemd unit that inherits nothing, so anything the parsers read for
-// discovery has to be captured into the unit at install time.
+// discovery has to be captured into the unit at install time. Keep this list in
+// sync with the store-locating variables the parsers and roots modules read
+// (`grep -rho 'process\.env\.[A-Z_]*' src/parsers src/*-roots.js`): a variable
+// missing here makes the background service sync a different store than the
+// foreground CLI (issue #112). Test-only overrides (`VIBE_USAGE_*`) and
+// accounting knobs are deliberately absent -- they do not relocate a store.
 const PRESERVED_SERVICE_ENV = [
+  'AMP_DATA_DIR',
   'CLINE_DIR',
   'CLINE_DATA_DIR',
   'CLINE_SESSION_DATA_DIR',
+  'CODEBUDDY_CONFIG_DIR',
+  'CODEX_HOME',
   'COLA_DATA_DIR',
+  'CRAFT_AGENT_DIR',
+  'CRAFTAGENT_DIR',
+  'CURSOR_CONFIG_DIR',
+  'DIMCODE_HOME',
+  'DSH_HOME',
+  'GROK_HOME',
   'HERMES_HOME',
+  'KIMI_CODE_HOME',
+  'KIRO_BASE_PATH',
+  'KIRO_CLI_DB_PATH',
+  'KIRO_CLI_SESSIONS_DIR',
+  'KIRO_SESSIONS_DIR',
+  'KIRO_USER_PATH',
   'MCODE_HOME',
   'MIMOCODE_HOME',
   'MIMOCODE_DB',
-  'XDG_DATA_HOME',
+  'PI_CONFIG_DIR',
   'PI_CODING_AGENT_DIR',
   'PI_CODING_AGENT_SESSION_DIR',
+  'XDG_DATA_HOME',
 ];
 
 function serviceEnvironment(claudeConfigDir, env) {

@@ -264,6 +264,69 @@ test('Kimi parser supports summary, detail.remaining, duration, and reset spelli
   assert.equal(meters[1].resetsAt, '2026-09-07T05:00:00.000Z');
 });
 
+test('Kimi credential discovery follows the CLI 2.x home before the legacy one', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'vibe-usage-kimi-home-'));
+  try {
+    // No login anywhere: the current CLI's path is named, not the legacy one.
+    assert.equal(kimiCredentialPath({}, root), join(root, '.kimi-code', 'credentials', 'kimi-code.json'));
+    assert.equal(kimiCredentialPath({ KIMI_CODE_HOME: join(root, 'custom') }, root),
+      join(root, 'custom', 'credentials', 'kimi-code.json'));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('Kimi fetch reads the login from the CLI 2.x home (issue #112)', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'vibe-usage-kimi-code-home-'));
+  mkdirSync(join(root, '.kimi-code', 'credentials'), { recursive: true });
+  writeFileSync(join(root, '.kimi-code', 'credentials', 'kimi-code.json'), JSON.stringify({
+    access_token: 'kimi-code-2x-token',
+    refresh_token: 'must-not-be-used',
+    expires_at: 2_000_000_000,
+  }));
+  let authorization;
+  try {
+    assert.equal(kimiCredentialPath({}, root),
+      join(root, '.kimi-code', 'credentials', 'kimi-code.json'));
+    // An existing login outranks a configured home that holds none, and the
+    // current home outranks a legacy login.
+    assert.equal(kimiCredentialPath({ KIMI_SHARE_DIR: join(root, 'missing-share') }, root),
+      join(root, '.kimi-code', 'credentials', 'kimi-code.json'));
+    assert.equal(kimiCredentialPath({ KIMI_CODE_HOME: root }, root),
+      join(root, '.kimi-code', 'credentials', 'kimi-code.json'));
+
+    const result = await fetchKimiCodeQuota({
+      environment: {},
+      home: root,
+      now: new Date('2026-09-07T00:00:00Z'),
+      fetchImpl: async (_url, request) => {
+        authorization = request.headers.Authorization;
+        return jsonResponse(kimiPayload);
+      },
+    });
+    assert.equal(authorization, 'Bearer kimi-code-2x-token');
+    assert.equal(result.status, 'ok');
+    assert.equal(result.meters.length, 2);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('Kimi fetch still reads a legacy ~/.kimi login when the 2.x home is absent', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'vibe-usage-kimi-legacy-home-'));
+  mkdirSync(join(root, '.kimi', 'credentials'), { recursive: true });
+  writeFileSync(join(root, '.kimi', 'credentials', 'kimi-code.json'), JSON.stringify({
+    access_token: 'legacy-token',
+    refresh_token: 'legacy-refresh',
+    expires_at: 2_000_000_000,
+  }));
+  try {
+    assert.equal(kimiCredentialPath({}, root), join(root, '.kimi', 'credentials', 'kimi-code.json'));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('Kimi fetch keeps a fresh official login unchanged and sends bearer auth', async () => {
   const root = mkdtempSync(join(tmpdir(), 'vibe-usage-kimi-quota-'));
   const share = join(root, 'share');
