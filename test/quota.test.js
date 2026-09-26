@@ -17,9 +17,11 @@ import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import { pathToFileURL } from 'node:url';
 import { discoverQuotaProducts, fetchQuotaProducts } from '../src/quotas/registry.js';
+import { quotaResult } from '../src/quotas/schema.js';
 import {
   fetchKimiCodeQuota,
   kimiCredentialPath,
+  kimiCredentialPaths,
   parseKimiUsage,
 } from '../src/quotas/providers/kimi-code.js';
 import {
@@ -253,75 +255,89 @@ test('Kimi parser supports summary, detail.remaining, duration, and reset spelli
   const meters = parseKimiUsage(kimiPayload, new Date('2026-09-07T00:00:00Z'));
   assert.equal(meters.length, 2);
   assert.deepEqual(meters[0], {
+    id: '1-5h',
+    label: '5h',
+    utilization: 20,
+    resetsAt: '2026-09-07T05:00:00.000Z',
+    windowSeconds: 18_000,
+  });
+  assert.deepEqual(meters[1], {
     id: '0-weekly',
-    label: 'Weekly',
+    label: '7d',
     utilization: 25,
     resetsAt: '2026-09-14T00:00:00.000Z',
+    windowSeconds: 604_800,
   });
-  assert.equal(meters[1].label, '5h');
-  assert.equal(meters[1].utilization, 20);
-  assert.equal(meters[1].windowSeconds, 18_000);
-  assert.equal(meters[1].resetsAt, '2026-09-07T05:00:00.000Z');
 });
 
-test('Kimi credential discovery follows the CLI 2.x home before the legacy one', async () => {
+test('Kimi parser supports the Kimi Code 2.x usages schema', () => {
+  const meters = parseKimiUsage({
+    usages: {
+      limit_5h: { used_ratio: 0.3, reset_time: '2026-09-11T18:00:00Z' },
+      limit_7d: { used_ratio: 0.2, reset_time: '2026-09-17T00:00:00Z' },
+      limit_month_total: { used_ratio: 0.4, reset_time: '2026-10-01T00:00:00Z' },
+      limit_month_code: { used_ratio: '0.25', reset_time: '2026-10-01T00:00:00Z' },
+    },
+  });
+
+  assert.deepEqual(meters, [
+    {
+      id: 'limit-5h', label: '5h', utilization: 30,
+      resetsAt: '2026-09-11T18:00:00.000Z', windowSeconds: 18_000,
+    },
+    {
+      id: 'limit-7d', label: '7d', utilization: 20,
+      resetsAt: '2026-09-17T00:00:00.000Z', windowSeconds: 604_800,
+    },
+    {
+      id: 'limit-month-total', label: 'Month', utilization: 40,
+      resetsAt: '2026-10-01T00:00:00.000Z',
+    },
+    {
+      id: 'limit-month-code', label: 'Monthly Code', utilization: 25,
+      resetsAt: '2026-10-01T00:00:00.000Z',
+    },
+  ]);
+});
+
+test('quota layout keeps generic periods first and preserves extra-meter order', () => {
+  const result = quotaResult({
+    id: 'kimi-code',
+    status: 'ok',
+    meters: [
+      { id: 'mcp', label: 'MCP', utilization: 4, windowSeconds: 2_592_000 },
+      { id: 'weekly', label: 'Weekly', utilization: 30 },
+      { id: 'sonnet', label: 'Sonnet', utilization: 40, windowSeconds: 604_800 },
+      { id: 'five-hour', label: '5h', utilization: 10, windowSeconds: 18_000 },
+      { id: 'extra', label: 'Extra', utilization: 50 },
+    ],
+  });
+
+  assert.deepEqual(result.meters.map(meter => meter.label), [
+    '5h', '7d', 'MCP', 'Sonnet', 'Extra',
+  ]);
+});
+
+test('Kimi deduplicates weekly aliases after canonicalizing their labels', () => {
+  const meters = parseKimiUsage({
+    usage: { name: 'Weekly', used: 25, limit: 100 },
+    limits: [{
+      window: { duration: 7, timeUnit: 'DAY' },
+      detail: { name: '7d', used: 25, limit: 100 },
+    }],
+  });
+
+  assert.deepEqual(meters.map(meter => meter.label), ['7d']);
+});
+
+test('Kimi credential discovery names the current CLI home when no login exists', () => {
   const root = mkdtempSync(join(tmpdir(), 'vibe-usage-kimi-home-'));
   try {
-    // No login anywhere: the current CLI's path is named, not the legacy one.
+    // No login anywhere: the current CLI's path is named, not the legacy one, so
+    // `missing_credentials` and a later rotation both point at the file the
+    // installed CLI writes (issue #112).
     assert.equal(kimiCredentialPath({}, root), join(root, '.kimi-code', 'credentials', 'kimi-code.json'));
-    assert.equal(kimiCredentialPath({ KIMI_CODE_HOME: join(root, 'custom') }, root),
-      join(root, 'custom', 'credentials', 'kimi-code.json'));
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test('Kimi fetch reads the login from the CLI 2.x home (issue #112)', async () => {
-  const root = mkdtempSync(join(tmpdir(), 'vibe-usage-kimi-code-home-'));
-  mkdirSync(join(root, '.kimi-code', 'credentials'), { recursive: true });
-  writeFileSync(join(root, '.kimi-code', 'credentials', 'kimi-code.json'), JSON.stringify({
-    access_token: 'kimi-code-2x-token',
-    refresh_token: 'must-not-be-used',
-    expires_at: 2_000_000_000,
-  }));
-  let authorization;
-  try {
-    assert.equal(kimiCredentialPath({}, root),
-      join(root, '.kimi-code', 'credentials', 'kimi-code.json'));
-    // An existing login outranks a configured home that holds none, and the
-    // current home outranks a legacy login.
-    assert.equal(kimiCredentialPath({ KIMI_SHARE_DIR: join(root, 'missing-share') }, root),
-      join(root, '.kimi-code', 'credentials', 'kimi-code.json'));
-    assert.equal(kimiCredentialPath({ KIMI_CODE_HOME: root }, root),
-      join(root, '.kimi-code', 'credentials', 'kimi-code.json'));
-
-    const result = await fetchKimiCodeQuota({
-      environment: {},
-      home: root,
-      now: new Date('2026-09-07T00:00:00Z'),
-      fetchImpl: async (_url, request) => {
-        authorization = request.headers.Authorization;
-        return jsonResponse(kimiPayload);
-      },
-    });
-    assert.equal(authorization, 'Bearer kimi-code-2x-token');
-    assert.equal(result.status, 'ok');
-    assert.equal(result.meters.length, 2);
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test('Kimi fetch still reads a legacy ~/.kimi login when the 2.x home is absent', async () => {
-  const root = mkdtempSync(join(tmpdir(), 'vibe-usage-kimi-legacy-home-'));
-  mkdirSync(join(root, '.kimi', 'credentials'), { recursive: true });
-  writeFileSync(join(root, '.kimi', 'credentials', 'kimi-code.json'), JSON.stringify({
-    access_token: 'legacy-token',
-    refresh_token: 'legacy-refresh',
-    expires_at: 2_000_000_000,
-  }));
-  try {
-    assert.equal(kimiCredentialPath({}, root), join(root, '.kimi', 'credentials', 'kimi-code.json'));
+    assert.equal(kimiCredentialPaths({}, root).length, 2);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -352,6 +368,45 @@ test('Kimi fetch keeps a fresh official login unchanged and sends bearer auth', 
     assert.equal(authorization, 'Bearer kimi-fixture-token');
     assert.equal(result.status, 'ok');
     assert.equal(result.meters.length, 2);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('Kimi fetch prefers the Kimi Code 2.x home and keeps the legacy login as fallback', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'vibe-usage-kimi-code-home-'));
+  const currentPath = join(root, '.kimi-code', 'credentials', 'kimi-code.json');
+  const legacyPath = join(root, '.kimi', 'credentials', 'kimi-code.json');
+  mkdirSync(join(root, '.kimi-code', 'credentials'), { recursive: true });
+  mkdirSync(join(root, '.kimi', 'credentials'), { recursive: true });
+  writeFileSync(currentPath, JSON.stringify({
+    access_token: 'current-token', refresh_token: 'current-refresh', expires_at: 2_000_000_000,
+  }));
+  writeFileSync(legacyPath, JSON.stringify({
+    access_token: 'legacy-token', refresh_token: 'legacy-refresh', expires_at: 2_000_000_000,
+  }));
+  try {
+    assert.deepEqual(kimiCredentialPaths({}, root), [currentPath, legacyPath]);
+    assert.equal(kimiCredentialPath({}, root), currentPath);
+    let authorization;
+    const result = await fetchKimiCodeQuota({
+      environment: {},
+      home: root,
+      now: new Date('2026-09-07T00:00:00Z'),
+      fetchImpl: async (_url, request) => {
+        authorization = request.headers.Authorization;
+        return jsonResponse({ usages: {
+          limit_5h: { used_ratio: 0.3, reset_time: '2026-09-07T05:00:00Z' },
+          limit_7d: { used_ratio: 0.2, reset_time: '2026-09-14T00:00:00Z' },
+        } });
+      },
+    });
+    assert.equal(authorization, 'Bearer current-token');
+    assert.equal(result.status, 'ok');
+    assert.deepEqual(result.meters.map(meter => meter.label), ['5h', '7d']);
+
+    rmSync(join(root, '.kimi-code'), { recursive: true, force: true });
+    assert.equal(kimiCredentialPath({}, root), legacyPath);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

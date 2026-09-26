@@ -2,7 +2,6 @@ import {
   accessSync,
   closeSync,
   constants as fsConstants,
-  existsSync,
   fsyncSync,
   mkdirSync,
   openSync,
@@ -16,7 +15,7 @@ import {
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { attachCacheScope } from '../cache.js';
-import { quotaResult } from '../schema.js';
+import { canonicalizeMeters, quotaResult } from '../schema.js';
 
 const PRODUCT_ID = 'kimi-code';
 const DEFAULT_USAGE_URL = 'https://api.kimi.com/coding/v1/usages';
@@ -111,6 +110,29 @@ export function parseKimiUsage(payload, now = new Date()) {
     throw new Error('Kimi usage response is not an object');
   }
   const meters = [];
+  if (payload.usages && typeof payload.usages === 'object' && !Array.isArray(payload.usages)) {
+    const currentMeters = [
+      ['limit_5h', '5h', 5 * 3600],
+      ['limit_7d', '7d', 7 * 86400],
+      ['limit_month_total', 'Monthly', null],
+      ['limit_month_code', 'Monthly Code', null],
+    ];
+    for (const [key, label, windowSeconds] of currentMeters) {
+      const entry = payload.usages[key];
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue;
+      const ratio = number(entry.used_ratio ?? entry.usedRatio);
+      if (ratio === null) continue;
+      const meter = {
+        id: key.replaceAll('_', '-'),
+        label,
+        utilization: Math.max(0, Math.min(100, ratio * 100)),
+      };
+      const resetsAt = resetDate(entry, now);
+      if (resetsAt) meter.resetsAt = resetsAt.toISOString();
+      if (windowSeconds) meter.windowSeconds = windowSeconds;
+      meters.push(meter);
+    }
+  }
   if (payload.usage && typeof payload.usage === 'object' && !Array.isArray(payload.usage)) {
     const summary = meterFrom(payload.usage, payload.usage, 0, 'Weekly', now);
     if (summary) meters.push(summary);
@@ -127,7 +149,7 @@ export function parseKimiUsage(payload, now = new Date()) {
     }
   }
   const seen = new Set();
-  return meters.filter(meter => {
+  return canonicalizeMeters(meters).filter(meter => {
     const key = `${meter.label}\0${meter.windowSeconds || ''}`;
     if (seen.has(key)) return false;
     seen.add(key);
@@ -135,35 +157,33 @@ export function parseKimiUsage(payload, now = new Date()) {
   });
 }
 
-// Kimi Code has two credential locations in the wild. kimi-cli (1.x) keeps
-// `$KIMI_SHARE_DIR/credentials/kimi-code.json`, defaulting to `~/.kimi`, while
-// the current CLI (2.x) writes `$KIMI_CODE_HOME/credentials/kimi-code.json`,
-// defaulting to `~/.kimi-code` -- the same home the session parser already
-// resolves. Reading only the legacy path reported `missing_credentials` for
+// Kimi Code has two credential locations in the wild: the current CLI (2.x)
+// writes `$KIMI_CODE_HOME/credentials/kimi-code.json`, defaulting to
+// `~/.kimi-code` -- the same home the session parser already resolves -- while
+// kimi-cli (1.x) keeps `$KIMI_SHARE_DIR/credentials/kimi-code.json`, defaulting
+// to `~/.kimi`. Reading only the legacy path reported `missing_credentials` for
 // every 2.x user whose login sits in the new home (issue #112), while their
 // usage parsed fine, so the quota card contradicted the token tables.
 export function kimiCredentialPaths(environment = process.env, home = homedir()) {
-  const directories = [
-    environment.KIMI_SHARE_DIR?.trim(),
-    environment.KIMI_CODE_HOME?.trim(),
-    join(home, '.kimi-code'),
-    join(home, '.kimi'),
-  ];
-  return directories.filter(Boolean).map(directory => join(directory, 'credentials', 'kimi-code.json'));
+  const codeHome = environment.KIMI_CODE_HOME?.trim() || join(home, '.kimi-code');
+  const legacyHome = environment.KIMI_SHARE_DIR?.trim() || join(home, '.kimi');
+  return [...new Set([codeHome, legacyHome]
+    .map(directory => join(directory, 'credentials', 'kimi-code.json')))];
 }
 
-/**
- * The credential file to read and, on refresh, to rotate atomically.
- *
- * A login that exists wins over one that does not, in the order above: an
- * explicitly configured home outranks the CLI default, and the current CLI
- * home outranks the legacy one. With no login anywhere the current CLI's path
- * is returned so `missing_credentials` (and any rotation that follows a later
- * login) names the file the installed CLI actually writes.
- */
+// The file to read and, on refresh, to rotate atomically: the first existing
+// login, current home before legacy, so a stale `KIMI_SHARE_DIR` cannot shadow
+// the CLI the user actually runs. With no login anywhere the current CLI's path
+// is returned, so `missing_credentials` (and any rotation after a later login)
+// names the file the installed CLI writes.
 export function kimiCredentialPath(environment = process.env, home = homedir()) {
   const paths = kimiCredentialPaths(environment, home);
-  return paths.find(path => existsSync(path)) || paths[0];
+  for (const path of paths) {
+    try {
+      if (statSync(path).isFile()) return path;
+    } catch {}
+  }
+  return paths[0];
 }
 
 function readCredentials(path) {
