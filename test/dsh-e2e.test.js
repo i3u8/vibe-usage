@@ -91,9 +91,9 @@ test('DSH sync backfills V3 usage without reset, preserves privacy, and protects
     assert.match(unchanged.stdout, /无新增数据/);
     assert.equal(received.length, 2);
     const priorState = readFileSync(join(stateDir, 'state.json'), 'utf8');
-    writeLog(4, []);
+    writeLog(5, []);
     const future = await sync();
-    assert.match(future.stderr, /format version 4/);
+    assert.match(future.stderr, /format version 5/);
     assert.equal(received.length, 2);
     assert.equal(readFileSync(join(stateDir, 'state.json'), 'utf8'), priorState);
   } finally {
