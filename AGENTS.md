@@ -385,6 +385,7 @@ Test hooks (env vars honored at module load, set them before importing):
   (`npm version <x.y.z> --no-git-tag-version` updates both; hand-editing one is how they drift)
 - Published as `@vibe-cafe/vibe-usage` on npm
 - Users run via `npx @vibe-cafe/vibe-usage`
+- **Release entry point: `scripts/release.sh`** — run it from a real terminal, never behind a pipe. `scripts/release.sh --dry-run` runs every preflight and stops before publishing; `scripts/release.sh [<expected-version>]` publishes the version in `package.json`, asserting it equals the argument when one is given. It mechanises the rules in this section and the next: main branch, clean tree, `--ff-only` pull, `package.json`/`package-lock.json` version agreement, the version not already on the registry (`npm view --prefer-online` — the cached form reports the *previous* release), a green `node --test`, a logged-in npm, `script(1)` instead of a pipe so passkey 2FA still opens a browser, and post-publish verification by unpacking the published tarball and running `npx` from a temporary directory. The prose below is *why* each check exists — read it before weakening one. The script is not shipped to npm (`files` is `bin/` + `src/`). Verified through the login check on a machine with no npm credentials; the publish and post-publish steps have not been exercised end-to-end.
 
 ### Publishing with 2FA on the account
 
