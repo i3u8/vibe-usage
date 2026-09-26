@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { delimiter, join } from 'node:path';
 import { attachCacheScope } from '../cache.js';
@@ -45,7 +45,7 @@ function date(value) {
  * nothing else in the row or database is selected, logged, cached, or
  * uploaded.
  */
-function readCredential(root) {
+function readCredentialTable(root) {
   const dbPath = openCodeDbPath(root);
   if (!existsSync(dbPath)) return { status: 'missing' };
   try {
@@ -69,6 +69,40 @@ function readCredential(root) {
     if (/no such table|no such column/i.test(error?.message || '')) return { status: 'missing' };
     return { status: 'error' };
   }
+}
+
+/**
+ * Fallback for the pre-2.x layout, which keeps the same key as plain JSON in
+ * `auth.json` (`{"opencode": {"type": "api", "key": "sk-..."}}`). Only that one
+ * entry is read; sibling provider credentials in the file are never inspected,
+ * and the key is returned to the caller without ever being logged or cached.
+ * The credential table stays authoritative when it has a Go row — it is the
+ * Go-specific record, while `auth.json` also holds non-Go keys.
+ */
+function readAuthFile(root) {
+  let parsed = null;
+  try {
+    parsed = JSON.parse(readFileSync(join(root, 'auth.json'), 'utf8'));
+  } catch {
+    return { status: 'missing' };
+  }
+  const key = parsed?.opencode?.key;
+  const trimmed = typeof key === 'string' ? key.trim() : '';
+  return trimmed ? { status: 'ok', key: trimmed } : { status: 'missing' };
+}
+
+/**
+ * The Go key for one data root, or a failure to report. The credential table
+ * wins; `auth.json` covers stores that never migrated. A concrete table read
+ * failure is preserved only when the fallback has no key either, so an
+ * unreadable database cannot hide a perfectly good login.
+ */
+function readCredential(root) {
+  const table = readCredentialTable(root);
+  if (table.status === 'ok') return table;
+  const authFile = readAuthFile(root);
+  if (authFile.status === 'ok') return authFile;
+  return table;
 }
 
 export function parseOpenCodeGoUsage(payload) {

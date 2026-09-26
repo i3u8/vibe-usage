@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -157,3 +157,87 @@ test('OpenCode Go data roots default to the OpenCode data directory and honor th
     ['/a/opencode', '/b/opencode']
   );
 });
+
+test('OpenCode Go folds a pre-2.x auth.json login in when the credential table has no Go row', async () => withFixture(async dataRoot => {
+  // 1.x data home: a credential table exists but holds no `opencode-go` row,
+  // and the CLI's own auth.json carries the key the usage endpoint accepts.
+  credentialFixture(dataRoot, [{ integrationId: 'anthropic', value: { type: 'oauth', access: 'must-not-be-read' } }]);
+  writeFileSync(join(dataRoot, 'auth.json'), JSON.stringify({
+    anthropic: { type: 'oauth', access: 'must-not-be-read' },
+    opencode: { type: 'api', key: '  sk-auth-file-key  ' },
+  }));
+
+  const requests = [];
+  const result = await fetchOpenCodeGoQuota({
+    environment: { VIBE_USAGE_OPENCODE_DIRS: dataRoot },
+    home: '/definitely/missing-home',
+    now: new Date('2026-09-26T09:00:00Z'),
+    fetchImpl: async (url, options) => {
+      requests.push({ url, options });
+      return jsonResponse(usagePayload);
+    },
+  });
+
+  assert.equal(result.status, 'ok');
+  assert.equal(requests[0].options.headers.Authorization, 'Bearer sk-auth-file-key');
+  assert.equal(JSON.stringify(result).includes('sk-auth-file-key'), false);
+}));
+
+test('OpenCode Go prefers the Go-specific credential row over auth.json', async () => withFixture(async dataRoot => {
+  credentialFixture(dataRoot, [{ integrationId: 'opencode-go', value: { type: 'key', key: 'sk-go-row-key' } }]);
+  writeFileSync(join(dataRoot, 'auth.json'), JSON.stringify({
+    opencode: { type: 'api', key: 'sk-auth-file-key' },
+  }));
+
+  let authorization;
+  const result = await fetchOpenCodeGoQuota({
+    environment: { VIBE_USAGE_OPENCODE_DIRS: dataRoot },
+    home: '/definitely/missing-home',
+    fetchImpl: async (_url, options) => {
+      authorization = options.headers.Authorization;
+      return jsonResponse(usagePayload);
+    },
+  });
+
+  assert.equal(result.status, 'ok');
+  assert.equal(authorization, 'Bearer sk-go-row-key');
+}));
+
+test('OpenCode Go falls back to auth.json when the credential store cannot be read', async () => withFixture(async dataRoot => {
+  mkdirSync(dataRoot, { recursive: true });
+  writeFileSync(openCodeDbPath(dataRoot), 'not a sqlite database');
+  writeFileSync(join(dataRoot, 'auth.json'), JSON.stringify({
+    opencode: { type: 'api', key: 'sk-auth-file-key' },
+  }));
+
+  let authorization;
+  const result = await fetchOpenCodeGoQuota({
+    environment: { VIBE_USAGE_OPENCODE_DIRS: dataRoot },
+    home: '/definitely/missing-home',
+    fetchImpl: async (_url, options) => {
+      authorization = options.headers.Authorization;
+      return jsonResponse(usagePayload);
+    },
+  });
+
+  assert.equal(result.status, 'ok');
+  assert.equal(authorization, 'Bearer sk-auth-file-key');
+}));
+
+test('OpenCode Go reports missing credentials when neither store holds an OpenCode key', async () => withFixture(async dataRoot => {
+  credentialFixture(dataRoot, [{ integrationId: 'anthropic', value: { type: 'oauth', access: 'x' } }]);
+  writeFileSync(join(dataRoot, 'auth.json'), JSON.stringify({
+    anthropic: { type: 'oauth', access: 'must-not-be-read' },
+    opencode: { type: 'api', key: '   ' },
+  }));
+
+  let called = false;
+  const result = await fetchOpenCodeGoQuota({
+    environment: { VIBE_USAGE_OPENCODE_DIRS: dataRoot },
+    home: '/definitely/missing-home',
+    fetchImpl: async () => { called = true; },
+  });
+
+  assert.equal(result.status, 'missing_credentials');
+  assert.equal(called, false);
+}));
