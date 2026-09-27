@@ -6,6 +6,7 @@ import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fetchOpenCodeGoQuota, openCodeDataRoots, openCodeDbPath, parseOpenCodeGoUsage } from '../src/quotas/providers/opencode-go.js';
+import { quotaResult } from '../src/quotas/schema.js';
 
 const require = createRequire(import.meta.url);
 
@@ -240,4 +241,33 @@ test('OpenCode Go reports missing credentials when neither store holds an OpenCo
 
   assert.equal(result.status, 'missing_credentials');
   assert.equal(called, false);
+}));
+
+test('OpenCode Go marks a missing subscription with a machine-readable reason', async () => withFixture(async dataRoot => {
+  credentialFixture(dataRoot);
+  const result = await fetchOpenCodeGoQuota({
+    environment: { VIBE_USAGE_OPENCODE_DIRS: dataRoot },
+    home: '/definitely/missing-home',
+    fetchImpl: async () => jsonResponse({ type: 'error' }, 403),
+  });
+
+  // A client can render 「未订阅」 from the reason instead of parsing the message.
+  assert.equal(result.status, 'no_data');
+  assert.equal(result.emptyReason, 'notEntitled');
+}));
+
+test('quota results reject an unknown emptyReason', async () => withFixture(async dataRoot => {
+  credentialFixture(dataRoot);
+  const result = await fetchOpenCodeGoQuota({
+    environment: { VIBE_USAGE_OPENCODE_DIRS: dataRoot },
+    home: '/definitely/missing-home',
+    fetchImpl: async () => jsonResponse(usagePayload),
+  });
+  // The healthy path carries no reason at all.
+  assert.equal(result.emptyReason, undefined);
+
+  assert.throws(
+    () => quotaResult({ id: 'opencode-go', status: 'no_data', emptyReason: 'made-up' }),
+    /invalid quota emptyReason/,
+  );
 }));
