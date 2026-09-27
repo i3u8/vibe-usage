@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 import { fetchOpenCodeGoQuota, openCodeDataRoots, openCodeDbPath, parseOpenCodeGoUsage } from '../src/quotas/providers/opencode-go.js';
 import { quotaResult } from '../src/quotas/schema.js';
 
@@ -152,9 +152,16 @@ test('OpenCode Go fetch maps authorization, entitlement, and transport failures'
 }));
 
 test('OpenCode Go data roots default to the OpenCode data directory and honor the override', () => {
-  assert.deepEqual(openCodeDataRoots({}, '/Users/example'), ['/Users/example/.local/share/opencode']);
+  // Build every expectation with the platform's own rules: the provider joins
+  // with node:path and splits the override on the platform delimiter, so a
+  // hardcoded POSIX literal (or a `:`-joined override) fails on Windows.
+  assert.deepEqual(openCodeDataRoots({}, '/Users/example'),
+    [join('/Users/example', '.local', 'share', 'opencode')]);
   assert.deepEqual(
-    openCodeDataRoots({ VIBE_USAGE_OPENCODE_DIRS: '/a/opencode:/b/opencode' }, '/Users/example'),
+    openCodeDataRoots(
+      { VIBE_USAGE_OPENCODE_DIRS: ['/a/opencode', '/b/opencode'].join(delimiter) },
+      '/Users/example'
+    ),
     ['/a/opencode', '/b/opencode']
   );
 });
