@@ -65,6 +65,23 @@ test('launchd service preserves and XML-escapes mcode home override', () => {
   assert.match(plist, /<string>\/tmp\/mcode&amp;a&lt;b&gt;<\/string>/);
 });
 
+test('services preserve the MiniMax Code relocation variables', () => {
+  // The mcode CLI relocates its data root with these; a daemon that loses them
+  // would sync a different (usually empty) store than the foreground CLI.
+  const unit = generateSystemdUnit('/usr/bin/node', '/opt/vibe-usage/bin.js', undefined, {
+    MINIMAX_DATA_DIR: '/tmp/minimax "data"',
+    MAVIS_DATA_DIR: '/tmp/mavis data',
+  });
+  assert.match(unit, /Environment="MINIMAX_DATA_DIR=\/tmp\/minimax \\"data\\""/);
+  assert.match(unit, /Environment="MAVIS_DATA_DIR=\/tmp\/mavis data"/);
+
+  const plist = generateLaunchdPlist('/usr/bin/node', '/opt/vibe-usage/bin.js', undefined, {
+    MINIMAX_DATA_DIR: '/tmp/minimax&a<b>',
+  });
+  assert.match(plist, /<key>MINIMAX_DATA_DIR<\/key>/);
+  assert.match(plist, /<string>\/tmp\/minimax&amp;a&lt;b&gt;<\/string>/);
+});
+
 test('windows task cmd quotes paths, preserves env overrides, and doubles literal percents', () => {
   const cmd = generateWindowsTaskCmd(
     'C:\\Program Files\\nodejs\\node.exe',
