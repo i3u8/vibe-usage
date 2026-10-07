@@ -36,14 +36,17 @@ export async function parse({ extraRoots = [] } = {}) {
   }
   if (dbs.length === 0) return { buckets: [], sessions: [] };
 
-  const entries = [];
-  const sessionEvents = [];
-
+  // Read every store first: which copy of a session we count is decided across
+  // all of them, not per store.
+  const stores = [];
   for (const { path: dbPath, profile } of dbs) {
     let sessionRows;
     try {
       const columns = new Set(queryDb(dbPath, 'PRAGMA table_info(sessions)').map(row => row.name));
       const cacheWriteColumn = columns.has('cache_write_tokens') ? 'cache_write_tokens' : '0';
+      // No WHERE filter here: choosing the richest copy below needs every row,
+      // and `sessions` holds one row per session. The liveness filter the old
+      // query applied is kept in JS, so the emitted set is unchanged.
       sessionRows = queryDb(dbPath, `SELECT
         id,
         model,
@@ -53,15 +56,51 @@ export async function parse({ extraRoots = [] } = {}) {
         cache_read_tokens as cacheReadTokens,
         ${cacheWriteColumn} as cacheWriteTokens,
         reasoning_tokens as reasoningTokens
-        FROM sessions
-        WHERE input_tokens > 0 OR output_tokens > 0
-          OR cache_read_tokens > 0 OR ${cacheWriteColumn} > 0 OR reasoning_tokens > 0`);
+        FROM sessions`);
     } catch (err) {
       if (isSqliteUnavailableError(err)) throw sqliteUnavailableError('Hermes');
       throw err;
     }
+    stores.push({ dbPath, profile, sessionRows });
+  }
 
+  const sessionId = row => (typeof row.id === 'string' ? row.id.trim() : '');
+  const tokenTotal = row => toCount(row.inputTokens) + toCount(row.outputTokens)
+    + toCount(row.cacheReadTokens) + toCount(row.cacheWriteTokens) + toCount(row.reasoningTokens);
+
+  // A session's id is its stable record identity and its token columns are
+  // cumulative per-session totals, so one session reached through two databases
+  // (a copied or migrated home, a backup directory, a symlinked store) must be
+  // counted once. Path identity above only stops the same file being read twice
+  // -- it cannot see two files holding the same session, which counted that
+  // session's tokens twice while the timing stream, grouped by session hash,
+  // still reported a single session. Every other extra-root source dedups by
+  // its own record identity and keeps the most complete copy (opencode by
+  // session+message id, grok by session id, pi by message id); this is the same
+  // rule, with the earliest store winning a tie exactly as opencode lets the
+  // default root win.
+  const owners = new Map();
+  for (const store of stores) {
+    for (const row of store.sessionRows) {
+      const id = sessionId(row);
+      // A row with no id cannot be proven to be a copy of another row, so it
+      // stays scoped to its own store rather than collapsing with its siblings.
+      if (!id) continue;
+      const previous = owners.get(id);
+      if (!previous || tokenTotal(row) > tokenTotal(previous.row)) owners.set(id, { store, row });
+    }
+  }
+
+  const entries = [];
+  const sessionEvents = [];
+
+  for (const { profile, sessionRows } of stores) {
     for (const row of sessionRows) {
+      const id = sessionId(row);
+      if (id && owners.get(id).row !== row) continue; // a richer copy owns this session
+      // Rows with no tokens at all contribute no bucket, as in the old query.
+      if (tokenTotal(row) === 0) continue;
+
       // started_at is a Unix timestamp (float)
       const timestamp = new Date(row.startedAt * 1000);
       if (isNaN(timestamp.getTime())) continue;
@@ -82,7 +121,16 @@ export async function parse({ extraRoots = [] } = {}) {
         reasoningOutputTokens: reasoning,
       });
     }
+  }
 
+  // Timing events carry their own record identity: one (session, role,
+  // timestamp) triple is one message, and a copied store repeats it verbatim.
+  // extractSessions counts every event it is handed, so without this the copy
+  // inflated messageCount while the session hash -- and therefore the session
+  // count -- stayed the same, leaving the two streams disagreeing about the
+  // same history. Dedup by that triple, first store winning.
+  const seenMessages = new Set();
+  for (const { dbPath, profile } of stores) {
     // A failed query is not an empty session history. Let sync protect this
     // source's previous state instead of uploading/pruning a partial result.
     const messageRows = queryDb(dbPath, `SELECT
@@ -96,6 +144,9 @@ export async function parse({ extraRoots = [] } = {}) {
     for (const row of messageRows) {
       const timestamp = new Date(row.timestamp * 1000);
       if (isNaN(timestamp.getTime())) continue;
+      const key = `${row.sessionId ?? ''}|${row.role}|${timestamp.getTime()}`;
+      if (seenMessages.has(key)) continue;
+      seenMessages.add(key);
 
       sessionEvents.push({
         sessionId: row.sessionId,
